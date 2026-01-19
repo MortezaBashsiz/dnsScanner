@@ -9,6 +9,7 @@ You have to install the following packages:
 [curl](https://curl.se/download.html)<br>
 [parallel (version > 20220515)](https://www.gnu.org/software/parallel/)<br>
 [shuf](https://www.gnu.org/software/coreutils/)
+[dig](https://linux.die.net/man/1/dig)
 
 ## How to run
 ### 1. clone
