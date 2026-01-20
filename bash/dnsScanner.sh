@@ -153,10 +153,11 @@ function fncShowProgress {
 # Function fncCheckIPList
 # Check Subnet
 function fncCheckIPList {
-  local ipList resultFile domain
+  local ipList resultFile domain dnsTypeLocal
   ipList="${1}"
   resultFile="${3}"
   domain="${4}"
+  dnsTypeLocal="${5:-TXT}"
 
   # set proper command for linux
   if command -v timeout >/dev/null 2>&1; 
@@ -174,7 +175,7 @@ function fncCheckIPList {
   fi
   for ip in ${ipList}
     do
-      result=$(timeout 1 dig +short "$domain" @"$ip")
+      result=$("$timeoutCommand" 1 dig +short @"$ip" "$domain" "$dnsTypeLocal")
       if [[ "$result" != "" ]]; then
         echo -e "$ip" 
         echo -e "$ip" >> "$resultFile" 
@@ -213,6 +214,7 @@ function fncMainCFFindSubnet {
   progressBar="${2}"
   resultFile="${3}"
   subnetsFile="${4}"
+  local dnsTypeLocal="${5:-TXT}"
 
   if [[ "$subnetsFile" == "NULL" ]] 
   then
@@ -269,7 +271,7 @@ function fncMainCFFindSubnet {
       ipList=$(fncSubnetToIP "$breakedSubnet")
       tput cuu1; tput ed # rewrites Parallel's bar
       #echo -e "${RED}$progressBar${NC}"
-      parallel --ll --bar -j "$threads" fncCheckIPList ::: "$ipList" ::: "$progressBar" ::: "$resultFile" ::: "$domain"
+      parallel --ll --bar -j "$threads" fncCheckIPList ::: "$ipList" ::: "$progressBar" ::: "$resultFile" ::: "$domain" ::: "$dnsTypeLocal"
       killall v2ray > /dev/null 2>&1
       passedIpsCount=$(( passedIpsCount+1 ))
     done
@@ -288,14 +290,17 @@ function fncUsage {
     [ -p|--thread <int> ]
     [ -f|--file <string> ]
     [ -d|--domain <string> ]
-    [ -h|--help ]\n"
+    [ -t|--type <string> ]
+    [ -h|--help ]\n
+  DNS type examples: A, AAAA, NS, TXT, MX (default: TXT)\n"
   exit 2
 }
 # End of Function fncUsage
 
 threads="4"
+dnsType="TXT"
 
-parsedArguments=$(getopt -a -n dnsScanner -o p:f:d:h --long thread:,file:,domain:,help -- "$@")
+parsedArguments=$(getopt -a -n dnsScanner -o p:f:d:t:h --long thread:,file:,domain:,type:,help -- "$@")
 
 eval set -- "$parsedArguments"
 while :
@@ -304,6 +309,7 @@ do
     -p|--thread) threads="$2" ; shift 2 ;;
     -f|--file) subnetIPFile="$2" ; shift 2 ;;
     -d|--domain) domain="$2" ; shift 2 ;;
+    -t|--type) dnsType="$2" ; shift 2 ;;
     -h|--help) fncUsage ;;
     --) shift; break ;;
     *) echo "Unexpected option: $1 is not acceptable"
@@ -343,4 +349,4 @@ export NC='\033[0m'
 fncCreateDir "${resultDir}"
 echo "" > "$resultFile"
 
-fncMainCFFindSubnet "$threads" "$progressBar" "$resultFile" "$subnetIPFile"
+fncMainCFFindSubnet "$threads" "$progressBar" "$resultFile" "$subnetIPFile" "$dnsType"
