@@ -1,6 +1,7 @@
 # DNS Scanner
-This project scans large IP ranges and writes a result file containing IPs that respond as DNS servers for a given query.
+This script scans Millions of IP addresses and generates a result file containing the IPs which are DNS 
 
 ## Bash
 
-See `bash/` for the Bash implementation, usage, and requirements.
+For Bash find out [here](https://github.com/MortezaBashsiz/dnsScanner/tree/main/bash "here").
+
