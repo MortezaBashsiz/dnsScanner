@@ -18,14 +18,20 @@ You have to install the following packages:
 [~]>$ git clone https://github.com/MortezaBashsiz/dnsScanner.git
 ```
 
-### 2. Change directory and make them executable
+### 2. Change directory and make scripts executable
 
 ```shell
 [~]>$ cd dnsScanner/bash
-[~/dnsScanner/bash]> chmod +x ../bin/*
+[~/dnsScanner/bash]> chmod +x ./dnsScanner.sh ./install_requirements.sh
 ```
 
-### 3. Use it
+### 3. Install requirements (recommended)
+
+```shell
+[~/dnsScanner/bash]> ./install_requirements.sh
+```
+
+### 4. Use it
 
 ```shell
 [~/dnsScanner/bash]> ./dnsScanner.sh -h
@@ -33,12 +39,28 @@ Usage: dnsScanner
     [ -p|--thread <int> ]
     [ -f|--file <string> ]
     [ -d|--domain <string> ]
+    [ -t|--type <string> ]
+    [ -r|--random-subdomain ]
     [ -h|--help ]
 
 ```
 Example
 ```shell
 [~/dnsScanner/bash]> ./dnsScanner.sh -p 80 -f iran-ipv4.cidrs -d nic.ir
+```
+
+Example (different DNS type)
+
+```shell
+[~/dnsScanner/bash]> ./dnsScanner.sh -p 80 -f iran-ipv4.cidrs -d nic.ir -t NS
+```
+
+Example (avoid cached DNS responses)
+
+> Note: `-r/--random-subdomain` is intended to be used with a **wildcard DNS record** (e.g. `*.example.com`) so all random subdomains resolve.
+
+```shell
+[~/dnsScanner/bash]> ./dnsScanner.sh -p 80 -f iran-ipv4.cidrs -d example.com -t TXT -r
 ```
 
 To list countries IP addresses use following links
