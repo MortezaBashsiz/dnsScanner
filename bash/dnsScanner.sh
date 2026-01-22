@@ -187,10 +187,11 @@ function fncCheckIPList {
         fi
         queryDomain="${randLabel}.${domain}"
       fi
-      result=$("$timeoutCommand" 1 dig +short @"$ip" "$queryDomain" "$dnsTypeLocal")
-      if [[ "$result" != "" ]]; then
-        echo -e "$ip" 
-        echo -e "$ip" >> "$resultFile" 
+      result=$("$timeoutCommand" 1 dig +short @"$ip" "$queryDomain" "$dnsTypeLocal" 2>&1)
+      # check if result is non-empty and doesn't contain error messages
+      if [[ -n "$result" ]] && [[ ! "$result" =~ "no servers could be reached" ]] && [[ ! "$result" =~ "communications error" ]]; then
+        echo -e "$ip"
+        echo -e "$ip" >> "$resultFile"
       fi
   done
 }
