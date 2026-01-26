@@ -6,14 +6,16 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import mmap
+import platform
 import secrets
+import stat
 import subprocess
 import sys
 import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Set, AsyncGenerator
+from typing import Set, AsyncGenerator, Optional
 
 import aiodns
 import httpx
@@ -25,14 +27,374 @@ from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import Button, DataTable, Footer, Header, Static, RichLog, Input, Label, Checkbox, Select, DirectoryTree
 
-# Configure logging
-logger.remove()
-logger.add(
-    "logs/dnsscanner_{time}.log",
-    rotation="50 MB",
-    compression="zip",
-    level="DEBUG",
-)
+# Configure logging (disabled by default)
+logger.remove()  # Remove default handler to disable logging
+# Uncomment the line below to enable file logging
+# logger.add(
+#     "logs/dnsscanner_{time}.log",
+#     rotation="50 MB",
+#     compression="zip",
+#     level="DEBUG",
+# )
+
+
+class SlipstreamManager:
+    """Manages slipstream client download and execution across platforms."""
+    
+    DOWNLOAD_URLS = {
+        "Darwin-arm64": "https://github.com/AliRezaBeigy/slipstream-rust-deploy/releases/latest/download/slipstream-client-darwin-arm64",
+        "Darwin-x86_64": "https://github.com/AliRezaBeigy/slipstream-rust-deploy/releases/latest/download/slipstream-client-darwin-amd64",
+        "Windows": "https://github.com/AliRezaBeigy/slipstream-rust-deploy/releases/latest/download/slipstream-client-windows-amd64.exe",
+        "Linux": "https://github.com/AliRezaBeigy/slipstream-rust-deploy/releases/latest/download/slipstream-client-linux-amd64",
+    }
+    
+    # Primary filenames (for new downloads)
+    FILENAMES = {
+        "Darwin-arm64": "slipstream-client-darwin-arm64",
+        "Darwin-x86_64": "slipstream-client-darwin-amd64",
+        "Windows": "slipstream-client-windows-amd64.exe",
+        "Linux": "slipstream-client-linux-amd64",
+    }
+    
+    # Alternative filenames to check (for backwards compatibility)
+    ALT_FILENAMES = {
+        "Windows": ["slipstream-client.exe", "slipstream-client-windows-amd64.exe"],
+        "Darwin-arm64": ["slipstream-client", "slipstream-client-darwin-arm64"],
+        "Darwin-x86_64": ["slipstream-client", "slipstream-client-darwin-amd64"],
+        "Linux": ["slipstream-client", "slipstream-client-linux-amd64"],
+    }
+    
+    PLATFORM_DIRS = {
+        "Darwin": "macos",
+        "Windows": "windows",
+        "Linux": "linux",
+    }
+    
+    def __init__(self):
+        self.base_dir = Path(__file__).parent.parent / "slipstream-client"
+        self.system = platform.system()
+        self.machine = platform.machine()
+        self._cached_executable_path: Optional[Path] = None
+        
+        # Normalize machine architecture
+        if self.machine in ("x86_64", "AMD64", "i386", "i686", "x86"):
+            self.machine = "x86_64"
+        elif self.machine == "aarch64":
+            self.machine = "arm64"
+    
+    def get_platform_key(self) -> str:
+        """Get the platform key for download URLs."""
+        # Windows uses a single key (no architecture differentiation)
+        if self.system == "Windows":
+            return "Windows"
+        elif self.system == "Linux":
+            return "Linux"
+        elif self.system == "Darwin":
+            # macOS differentiates between ARM and Intel
+            return f"Darwin-{self.machine}"
+        else:
+            raise RuntimeError(f"Unsupported platform: {self.system}")
+    
+    def get_platform_dir(self) -> Path:
+        """Get the platform-specific directory."""
+        dir_name = self.PLATFORM_DIRS.get(self.system, self.system.lower())
+        return self.base_dir / dir_name
+    
+    def get_executable_path(self) -> Path:
+        """Get the path to the slipstream executable.
+        
+        First checks for any existing executable (including legacy names),
+        then falls back to the primary filename for new downloads.
+        """
+        # Return cached path if already found
+        if self._cached_executable_path and self._cached_executable_path.exists():
+            return self._cached_executable_path
+        
+        platform_key = self.get_platform_key()
+        platform_dir = self.get_platform_dir()
+        
+        # Check for alternative filenames first (existing installations)
+        alt_filenames = self.ALT_FILENAMES.get(platform_key, [])
+        for filename in alt_filenames:
+            exe_path = platform_dir / filename
+            if exe_path.exists():
+                self._cached_executable_path = exe_path
+                return exe_path
+        
+        # Fall back to primary filename (for new downloads)
+        filename = self.FILENAMES.get(platform_key)
+        if not filename:
+            raise RuntimeError(f"Unsupported platform: {self.system} {self.machine}")
+        
+        return platform_dir / filename
+    
+    def is_installed(self) -> bool:
+        """Check if slipstream is already installed."""
+        platform_key = self.get_platform_key()
+        platform_dir = self.get_platform_dir()
+        
+        # Check all possible filenames
+        alt_filenames = self.ALT_FILENAMES.get(platform_key, [])
+        for filename in alt_filenames:
+            if (platform_dir / filename).exists():
+                return True
+        
+        # Also check primary filename
+        primary_filename = self.FILENAMES.get(platform_key)
+        if primary_filename and (platform_dir / primary_filename).exists():
+            return True
+        
+        return False
+    
+    def get_download_url(self) -> Optional[str]:
+        """Get the download URL for current platform."""
+        try:
+            platform_key = self.get_platform_key()
+            return self.DOWNLOAD_URLS.get(platform_key)
+        except RuntimeError:
+            return None
+    
+    async def download(self, progress_callback=None, max_retries: int = 5, retry_delay: float = 2.0) -> bool:
+        """Download slipstream for the current platform with resume and retry support.
+        
+        Args:
+            progress_callback: Optional callback(downloaded, total, status) for progress updates
+            max_retries: Maximum number of retry attempts
+            retry_delay: Delay between retries in seconds
+            
+        Returns:
+            True if download successful, False otherwise
+        """
+        url = self.get_download_url()
+        if not url:
+            return False
+        
+        exe_path = self.get_executable_path()
+        temp_path = exe_path.with_suffix(exe_path.suffix + ".partial")
+        platform_dir = self.get_platform_dir()
+        
+        # Create directory if it doesn't exist
+        platform_dir.mkdir(parents=True, exist_ok=True)
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Check if we have a partial download to resume
+                downloaded = 0
+                if temp_path.exists():
+                    downloaded = temp_path.stat().st_size
+                
+                headers = {}
+                if downloaded > 0:
+                    headers["Range"] = f"bytes={downloaded}-"
+                    if progress_callback:
+                        progress_callback(downloaded, 0, f"Resuming from {downloaded / (1024*1024):.1f} MB...")
+                
+                async with httpx.AsyncClient(
+                    follow_redirects=True, 
+                    timeout=httpx.Timeout(30.0, read=60.0, connect=30.0),
+                    verify=True,  # Enable SSL verification
+                    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+                ) as client:
+                    async with client.stream("GET", url, headers=headers) as response:
+                        # Check if server supports resume
+                        if response.status_code == 206:  # Partial content
+                            content_range = response.headers.get("content-range", "")
+                            if "/" in content_range:
+                                total = int(content_range.split("/")[1])
+                            else:
+                                total = downloaded + int(response.headers.get("content-length", 0))
+                            mode = "ab"  # Append mode
+                        elif response.status_code == 200:
+                            # Server doesn't support resume, start fresh
+                            total = int(response.headers.get("content-length", 0))
+                            downloaded = 0
+                            mode = "wb"  # Write mode (overwrite)
+                        else:
+                            response.raise_for_status()
+                            continue
+                        
+                        if progress_callback:
+                            progress_callback(downloaded, total, "Downloading...")
+                        
+                        with open(temp_path, mode) as f:
+                            async for chunk in response.aiter_bytes(chunk_size=32768):
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if progress_callback:
+                                    progress_callback(downloaded, total, "Downloading...")
+                
+                # Download complete - rename temp file to final
+                if temp_path.exists():
+                    if exe_path.exists():
+                        exe_path.unlink()
+                    temp_path.rename(exe_path)
+                
+                # Make executable on Unix-like systems
+                if self.system in ("Linux", "Darwin"):
+                    exe_path.chmod(exe_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                
+                return True
+                
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError, httpx.ConnectError) as e:
+                error_msg = f"{type(e).__name__}"
+                if hasattr(e, '__cause__') and e.__cause__:
+                    error_msg += f": {str(e.__cause__)}"
+                
+                if progress_callback:
+                    progress_callback(downloaded, 0, f"Retry {attempt}/{max_retries}: {error_msg}")
+                
+                if attempt < max_retries:
+                    await asyncio.sleep(retry_delay * attempt)  # Exponential backoff
+                    continue
+                else:
+                    # Max retries reached, keep partial file for next attempt
+                    return False
+            except Exception:
+                # Unexpected error - clean up partial download
+                if temp_path.exists():
+                    temp_path.unlink()
+                return False
+        
+        return False
+    
+    async def download_with_ui(self, progress_bar, log_widget, max_retries: int = 5, retry_delay: float = 2.0) -> bool:
+        """Download slipstream with UI updates for progress bar and log.
+        
+        This method handles UI updates directly in the async context without using call_from_thread.
+        
+        Args:
+            progress_bar: CustomProgressBar widget to update
+            log_widget: RichLog widget to write status messages
+            max_retries: Maximum number of retry attempts
+            retry_delay: Delay between retries in seconds
+            
+        Returns:
+            True if download successful, False otherwise
+        """
+        url = self.get_download_url()
+        if not url:
+            log_widget.write("[red]No download URL available for this platform[/red]")
+            return False
+        
+        exe_path = self.get_executable_path()
+        temp_path = exe_path.with_suffix(exe_path.suffix + ".partial")
+        platform_dir = self.get_platform_dir()
+        
+        # Create directory if it doesn't exist
+        platform_dir.mkdir(parents=True, exist_ok=True)
+        
+        last_logged_percent = -1
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Check if we have a partial download to resume
+                downloaded = 0
+                if temp_path.exists():
+                    downloaded = temp_path.stat().st_size
+                
+                headers = {}
+                if downloaded > 0:
+                    headers["Range"] = f"bytes={downloaded}-"
+                    log_widget.write(f"[cyan]Resuming from {downloaded / (1024*1024):.1f} MB...[/cyan]")
+                
+                async with httpx.AsyncClient(
+                    follow_redirects=True, 
+                    timeout=httpx.Timeout(30.0, read=60.0, connect=30.0),
+                    verify=True,
+                    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+                ) as client:
+                    async with client.stream("GET", url, headers=headers) as response:
+                        # Check if server supports resume
+                        if response.status_code == 206:  # Partial content
+                            content_range = response.headers.get("content-range", "")
+                            if "/" in content_range:
+                                total = int(content_range.split("/")[1])
+                            else:
+                                total = downloaded + int(response.headers.get("content-length", 0))
+                            mode = "ab"  # Append mode
+                        elif response.status_code == 200:
+                            # Server doesn't support resume, start fresh
+                            total = int(response.headers.get("content-length", 0))
+                            downloaded = 0
+                            mode = "wb"  # Write mode (overwrite)
+                        else:
+                            response.raise_for_status()
+                            continue
+                        
+                        log_widget.write(f"[cyan]Downloading...[/cyan] Total: {total / (1024*1024):.1f} MB")
+                        
+                        with open(temp_path, mode) as f:
+                            async for chunk in response.aiter_bytes(chunk_size=32768):
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                
+                                # Update progress bar
+                                if total > 0:
+                                    progress_bar.update_progress(downloaded, total)
+                                    
+                                    # Log progress at 10% intervals
+                                    current_percent = int((downloaded / total) * 10) * 10
+                                    if current_percent > last_logged_percent:
+                                        last_logged_percent = current_percent
+                                        mb_downloaded = downloaded / (1024 * 1024)
+                                        mb_total = total / (1024 * 1024)
+                                        log_widget.write(f"[dim]Progress: {mb_downloaded:.1f}/{mb_total:.1f} MB ({current_percent}%)[/dim]")
+                
+                # Download complete - rename temp file to final
+                if temp_path.exists():
+                    if exe_path.exists():
+                        exe_path.unlink()
+                    temp_path.rename(exe_path)
+                
+                # Make executable on Unix-like systems
+                if self.system in ("Linux", "Darwin"):
+                    exe_path.chmod(exe_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                
+                return True
+                
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError, httpx.ConnectError) as e:
+                error_msg = f"{type(e).__name__}"
+                if hasattr(e, '__cause__') and e.__cause__:
+                    error_msg += f": {str(e.__cause__)}"
+                
+                log_widget.write(f"[yellow]Retry {attempt}/{max_retries}: {error_msg}[/yellow]")
+                
+                if attempt < max_retries:
+                    log_widget.write(f"[dim]Waiting {retry_delay * attempt:.0f}s before retry...[/dim]")
+                    await asyncio.sleep(retry_delay * attempt)  # Exponential backoff
+                    continue
+                else:
+                    # Max retries reached, keep partial file for next attempt
+                    return False
+            except Exception as e:
+                log_widget.write(f"[red]Unexpected error: {type(e).__name__}: {e}[/red]")
+                # Unexpected error - clean up partial download
+                if temp_path.exists():
+                    temp_path.unlink()
+                return False
+        
+        return False
+    
+    def get_run_command(self, dns_ip: str, port: int, domain: str) -> list:
+        """Get the command to run slipstream (same args for all platforms).
+        
+        Args:
+            dns_ip: DNS server IP
+            port: TCP listen port
+            domain: Domain for slipstream
+            
+        Returns:
+            List of command arguments
+        """
+        exe_path = str(self.get_executable_path())
+        
+        return [
+            exe_path,
+            "--resolver", f"{dns_ip}:53",
+            "--resolver", "8.8.4.4:53",
+            "--tcp-listen-port", str(port),
+            "--domain", domain
+        ]
 
 
 class StatsWidget(Static):
@@ -239,7 +601,8 @@ class DNSScannerTUI(App):
         self.concurrency = 100
         self.random_subdomain = False
         self.test_slipstream = False
-        self.slipstream_path = str(Path(__file__).parent / "slipstream-client" / "windows" / "slipstream-client.exe")
+        self.slipstream_manager = SlipstreamManager()
+        self.slipstream_path = str(self.slipstream_manager.get_executable_path())
         self.slipstream_domain = ""
         self.found_servers: Set[str] = set()
         self.server_times: dict[str, float] = {}
@@ -250,6 +613,9 @@ class DNSScannerTUI(App):
         self.current_scanned = 0
         self.table_needs_rebuild = False
         self.scan_started = False
+        self.is_paused = False
+        self.pause_event = asyncio.Event()
+        self.pause_event.set()  # Not paused initially
         
         # Slipstream parallel testing config
         self.slipstream_max_concurrent = 3
@@ -316,6 +682,8 @@ class DNSScannerTUI(App):
                 with Container(id="logs"):
                     yield RichLog(id="log-display", highlight=True, markup=True)
             with Horizontal(id="controls"):
+                yield Button("⏸  Pause", id="pause-btn", variant="warning")
+                yield Button("▶  Resume", id="resume-btn", variant="primary")
                 yield Button("💾 Save Results", id="save-btn", variant="success")
                 yield Button("🛑 Quit", id="quit-btn", variant="error")
         
@@ -333,6 +701,13 @@ class DNSScannerTUI(App):
         table = self.query_one("#results-table", DataTable)
         table.add_columns("IP Address", "Response Time", "Status", "Proxy Test")
         table.cursor_type = "row"
+        
+        # Hide pause/resume buttons initially
+        try:
+            self.query_one("#pause-btn", Button).display = False
+            self.query_one("#resume-btn", Button).display = False
+        except Exception:
+            pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button clicks."""
@@ -344,6 +719,10 @@ class DNSScannerTUI(App):
             browser.display = not browser.display
         elif event.button.id == "exit-btn":
             self.exit()
+        elif event.button.id == "pause-btn":
+            self._pause_scan()
+        elif event.button.id == "resume-btn":
+            self._resume_scan()
         elif event.button.id == "save-btn":
             self.action_save_results()
         elif event.button.id == "quit-btn":
@@ -356,6 +735,40 @@ class DNSScannerTUI(App):
         file_input.value = str(event.path)
         # Hide browser
         self.query_one("#file-browser-container").display = False
+
+    def _pause_scan(self) -> None:
+        """Pause the current scan."""
+        if not self.scan_started or self.is_paused:
+            return
+        
+        self.is_paused = True
+        self.pause_event.clear()
+        self._log("[yellow]⏸  Scan paused[/yellow]")
+        self.notify("Scan paused", severity="warning")
+        
+        # Update button visibility
+        try:
+            self.query_one("#pause-btn", Button).display = False
+            self.query_one("#resume-btn", Button).display = True
+        except Exception:
+            pass
+
+    def _resume_scan(self) -> None:
+        """Resume the paused scan."""
+        if not self.scan_started or not self.is_paused:
+            return
+        
+        self.is_paused = False
+        self.pause_event.set()
+        self._log("[green]▶  Scan resumed[/green]")
+        self.notify("Scan resumed", severity="information")
+        
+        # Update button visibility
+        try:
+            self.query_one("#pause-btn", Button).display = True
+            self.query_one("#resume-btn", Button).display = False
+        except Exception:
+            pass
 
     def _start_scan_from_form(self) -> None:
         """Get values from form and start scanning."""
@@ -392,9 +805,22 @@ class DNSScannerTUI(App):
             self.notify("Please enter a domain!", severity="error")
             return
         
+        # Check if slipstream needs to be downloaded
+        if self.test_slipstream and not self.slipstream_manager.is_installed():
+            self.notify("Slipstream not found. Starting download...", severity="information")
+            self.run_worker(self._download_and_start_scan(), exclusive=True)
+            return
+        
         # Switch to scan screen
         self.query_one("#start-screen").display = False
         self.query_one("#scan-screen").display = True
+        
+        # Show pause button, hide resume button
+        try:
+            self.query_one("#pause-btn", Button).display = True
+            self.query_one("#resume-btn", Button).display = False
+        except Exception:
+            pass
         
         # Setup log display
         log_widget = self.query_one("#log-display", RichLog)
@@ -410,6 +836,47 @@ class DNSScannerTUI(App):
         self.scan_started = True
         self.run_worker(self._scan_async(), exclusive=True)
 
+    async def _download_and_start_scan(self) -> None:
+        """Download slipstream and then start the scan."""
+        log_widget = self.query_one("#log-display", RichLog)
+        progress_bar = self.query_one("#progress-bar", CustomProgressBar)
+        
+        # Switch to scan screen to show progress
+        self.query_one("#start-screen").display = False
+        self.query_one("#scan-screen").display = True
+        
+        log_widget.write("[bold cyan]DNS Scanner Log[/bold cyan]")
+        log_widget.write(f"[yellow]Platform:[/yellow] {self.slipstream_manager.system} {self.slipstream_manager.machine}")
+        log_widget.write("[cyan]Downloading Slipstream client...[/cyan]")
+        log_widget.write(f"[dim]URL: {self.slipstream_manager.get_download_url()}[/dim]")
+        
+        success = await self.slipstream_manager.download_with_ui(
+            progress_bar=progress_bar,
+            log_widget=log_widget,
+        )
+        
+        if success:
+            log_widget.write("[green]✓ Slipstream downloaded successfully![/green]")
+            progress_bar.update_progress(100, 100)  # Show 100%
+            self.slipstream_path = str(self.slipstream_manager.get_executable_path())
+            
+            # Continue with the scan
+            log_widget.write(f"[yellow]Subnet file:[/yellow] {self.subnet_file}")
+            log_widget.write(f"[yellow]Domain:[/yellow] {self.domain}")
+            log_widget.write(f"[yellow]DNS Type:[/yellow] {self.dns_type}")
+            log_widget.write(f"[yellow]Concurrency:[/yellow] {self.concurrency}")
+            log_widget.write("[yellow]Slipstream Test:[/yellow] Enabled")
+            log_widget.write("[green]Starting scan...[/green]\n")
+            
+            self.scan_started = True
+            await self._scan_async()
+        else:
+            log_widget.write("[red]✗ Failed to download Slipstream after multiple retries![/red]")
+            log_widget.write(f"[yellow]Expected path: {self.slipstream_manager.get_executable_path()}[/yellow]")
+            log_widget.write("[yellow]Partial download saved. Run again to resume.[/yellow]")
+            log_widget.write("[yellow]Or download manually and place in the path above.[/yellow]")
+            self.notify("Failed to download Slipstream. Run again to resume.", severity="error")
+
     async def _scan_async(self) -> None:
         """Async scanning logic."""
         # Reset state for re-scanning
@@ -418,6 +885,11 @@ class DNSScannerTUI(App):
         self.proxy_results.clear()
         self.current_scanned = 0
         self.table_needs_rebuild = False
+        
+        # Reset pause state
+        self.is_paused = False
+        self.pause_event = asyncio.Event()
+        self.pause_event.set()  # Not paused initially
         
         # Initialize slipstream parallel testing
         self.slipstream_semaphore = asyncio.Semaphore(self.slipstream_max_concurrent)
@@ -476,6 +948,9 @@ class DNSScannerTUI(App):
         chunk_num = 0
         
         async for ip_chunk in self._stream_ips_from_file():
+            # Check for pause
+            await self.pause_event.wait()
+            
             chunk_num += 1
             
             # Create tasks for this chunk
@@ -485,6 +960,9 @@ class DNSScannerTUI(App):
             
             # Process completed tasks periodically
             if len(active_tasks) >= chunk_size:
+                # Check for pause before processing
+                await self.pause_event.wait()
+                
                 self._log(f"[dim]Processing chunk {chunk_num}...[/dim]")
                 # Wait for some tasks to complete
                 done, active_tasks = await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -637,6 +1115,8 @@ class DNSScannerTUI(App):
     
     async def _test_dns_with_callback(self, ip: str, sem: asyncio.Semaphore) -> tuple[str, bool, float]:
         """Test DNS and return result tuple."""
+        # Wait if paused
+        await self.pause_event.wait()
         return await self._test_dns(ip, sem)
     
     async def _process_result(self, result: tuple[str, bool, float]) -> None:
@@ -907,14 +1387,8 @@ class DNSScannerTUI(App):
         """
         process = None
         try:
-            # Build slipstream command with dynamic port
-            cmd = [
-                self.slipstream_path,
-                "--resolver", f"{dns_ip}:53",
-                "--resolver", "8.8.4.4:53",
-                "--tcp-listen-port", str(port),
-                "--domain", self.slipstream_domain
-            ]
+            # Build slipstream command with dynamic port using the manager
+            cmd = self.slipstream_manager.get_run_command(dns_ip, port, self.slipstream_domain)
             
             # Start slipstream process
             process = await asyncio.create_subprocess_exec(
