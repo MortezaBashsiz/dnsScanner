@@ -239,8 +239,8 @@ class DNSScannerTUI(App):
         self.concurrency = 100
         self.random_subdomain = False
         self.test_slipstream = False
-        self.slipstream_path = r"C:\Users\user\Desktop\dnsscanner\slipstream-client.exe"
-        self.slipstream_domain = "re.iransafenet.space"
+        self.slipstream_path = str(Path(__file__).parent / "slipstream-client" / "windows" / "slipstream-client.exe")
+        self.slipstream_domain = ""
         self.found_servers: Set[str] = set()
         self.server_times: dict[str, float] = {}
         self.proxy_results: dict[str, str] = {}  # IP -> "Success", "Failed", or "Testing"
@@ -369,6 +369,7 @@ class DNSScannerTUI(App):
         
         self.subnet_file = file_input.value.strip()
         self.domain = domain_input.value.strip()
+        self.slipstream_domain = self.domain
         self.dns_type = str(type_select.value) if type_select.value else "A"
         self.random_subdomain = random_checkbox.value
         self.test_slipstream = slipstream_checkbox.value
