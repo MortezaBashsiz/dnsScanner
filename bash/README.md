@@ -8,7 +8,7 @@ You have to install the following packages:
 [bc](https://www.gnu.org/software/bc/)<br>
 [curl](https://curl.se/download.html)<br>
 [parallel (version > 20220515)](https://www.gnu.org/software/parallel/)<br>
-[shuf](https://www.gnu.org/software/coreutils/)
+[shuf](https://www.gnu.org/software/coreutils/)<br>
 [dig](https://linux.die.net/man/1/dig)
 
 ## How to run
