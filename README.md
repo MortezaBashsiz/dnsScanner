@@ -5,6 +5,6 @@ This script scans Millions of IP addresses and generates a result file containin
 
 For Bash find out [here](https://github.com/MortezaBashsiz/dnsScanner/tree/main/bash "here").
 
-## Bash
+## Python
 
 For Python with UI find out [here](https://github.com/MortezaBashsiz/dnsScanner/tree/main/python "here").
