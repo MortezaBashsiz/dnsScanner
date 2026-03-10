@@ -8,3 +8,7 @@ For Bash find out [here](https://github.com/MortezaBashsiz/dnsScanner/tree/main/
 ## Python
 
 For Python with UI find out [here](https://github.com/MortezaBashsiz/dnsScanner/tree/main/python "here").
+
+## Portable Binary with no Dependencies Required (Python TUI Version)
+
+For Portable Binary with UI find out [here](https://github.com/MortezaBashsiz/dnsScanner/releases/latest "here")
