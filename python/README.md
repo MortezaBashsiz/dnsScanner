@@ -6,6 +6,12 @@ A modern, high-performance DNS scanner with a beautiful Terminal User Interface 
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)
 
+> [!TIP]
+> If you cannot install Python dependencies on your system, you can download the **portable prebuilt binaries** for **Linux** and **macOS** from the **latest release** and use them directly without installing any additional requirements.
+>
+> **Latest release:** [Download portable builds](https://github.com/MortezaBashsiz/dnsScanner/releases/latest)
+
+
 ## ✨ Features
 
 - 🎨 **Beautiful TUI Interface** - Modern Dracula-themed terminal interface
