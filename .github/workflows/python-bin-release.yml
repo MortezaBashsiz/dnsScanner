@@ -1,0 +1,113 @@
+name: Build and Release Python dnsScanner
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'python/**'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            artifact_suffix: linux-x86_64
+
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            artifact_suffix: linux-arm64
+
+          - name: macos-x86_64
+            runner: macos-26-intel
+            artifact_suffix: macos-x86_64
+
+          - name: macos-arm64
+            runner: macos-26
+            artifact_suffix: macos-arm64
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: python
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build binary with PyInstaller
+        run: |
+          pyinstaller --onefile dnsscanner_tui.py
+
+      - name: Prepare binary artifact
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          mkdir -p ../release
+          cp "dist/dnsscanner_tui" "../release/dnsscanner_tui-${{ matrix.artifact_suffix }}-${SHORT_SHA}"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dnsscanner-${{ matrix.artifact_suffix }}-${{ github.run_id }}
+          path: release/dnsscanner_tui-${{ matrix.artifact_suffix }}-*
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-24.04
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Prepare release metadata
+        id: meta
+        shell: bash
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          cp python/iran-ipv4.cidrs "release-assets/iran-ipv4.cidrs"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.short_sha }}
+          name: dnsScanner-${{ steps.meta.outputs.short_sha }}
+          generate_release_notes: true
+          files: |
+            release-assets/**/dnsscanner_tui-*
+            release-assets/iran-ipv4.cidrs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
